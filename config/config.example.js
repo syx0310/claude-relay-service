@@ -40,6 +40,23 @@ const config = {
     renewalThresholdMinutes: parseInt(process.env.STICKY_SESSION_RENEWAL_THRESHOLD_MINUTES) || 0
   },
 
+  // 🧮 Codex 调度优化配置（OpenAI gpt-5-codex）
+  codexScheduling: {
+    headroomPrimaryNewPercent: parseInt(process.env.CODEX_HEADROOM_PRIMARY_NEW) || 15,
+    headroomPrimaryStickyPercent: parseInt(process.env.CODEX_HEADROOM_PRIMARY_STICKY) || 6,
+    headroomSecondaryNewPercent: parseInt(process.env.CODEX_HEADROOM_SECONDARY_NEW) || 10,
+    headroomSecondaryStickyPercent: parseInt(process.env.CODEX_HEADROOM_SECONDARY_STICKY) || 6,
+
+    weightPrimaryBurn: parseFloat(process.env.CODEX_WEIGHT_PRIMARY_BURN) || 1.0,
+    weightSecondaryBurn: parseFloat(process.env.CODEX_WEIGHT_SECONDARY_BURN) || 0.7,
+    secondaryBoost: parseFloat(process.env.CODEX_SECONDARY_BOOST) || 25,
+    stickinessBonus: parseFloat(process.env.CODEX_STICKINESS_BONUS) || 0.25,
+    lowHeadroomPenalty: parseFloat(process.env.CODEX_LOW_HEADROOM_PENALTY) || 1.2,
+
+    minSnapshotFreshSeconds: parseInt(process.env.CODEX_MIN_SNAPSHOT_FRESH_SECONDS) || 300,
+    maxRetryOn429: parseInt(process.env.CODEX_MAX_RETRY_ON_429) || 0
+  },
+
   // 🎯 Claude API配置
   claude: {
     apiUrl: process.env.CLAUDE_API_URL || 'https://api.anthropic.com/v1/messages',

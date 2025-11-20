@@ -3,10 +3,137 @@ const openaiResponsesAccountService = require('./openaiResponsesAccountService')
 const accountGroupService = require('./accountGroupService')
 const redis = require('../models/redis')
 const logger = require('../utils/logger')
+const appConfig = require('../../config/config')
 
 class UnifiedOpenAIScheduler {
   constructor() {
     this.SESSION_MAPPING_PREFIX = 'unified_openai_session_mapping:'
+  }
+
+  // 🎛️ 获取 Codex 调度配置（带默认值）
+  _getCodexSchedulingConfig() {
+    const cfg = appConfig.codexScheduling || {}
+
+    return {
+      // 粘滞与新会话的额度余量阈值（百分比）
+      headroomPrimaryNewPercent: cfg.headroomPrimaryNewPercent ?? 15, // 用户要求 primary 稍高
+      headroomPrimaryStickyPercent: cfg.headroomPrimaryStickyPercent ?? 6,
+      headroomSecondaryNewPercent: cfg.headroomSecondaryNewPercent ?? 10,
+      headroomSecondaryStickyPercent: cfg.headroomSecondaryStickyPercent ?? 6,
+
+      // 评分权重
+      weightPrimaryBurn: cfg.weightPrimaryBurn ?? 1.0,
+      weightSecondaryBurn: cfg.weightSecondaryBurn ?? 0.7,
+      secondaryBoost: cfg.secondaryBoost ?? 20, // 放大长周期影响，避免被短窗压制
+      stickinessBonus: cfg.stickinessBonus ?? 0.25,
+      lowHeadroomPenalty: cfg.lowHeadroomPenalty ?? 1.2,
+
+      // 快速过期阈值（秒），过期则鼓励刷新快要重置的配额
+      minSnapshotFreshSeconds: cfg.minSnapshotFreshSeconds ?? 300,
+
+      // 429 重试开关（暂不在此实现，保留作扩展）
+      maxRetryOn429: cfg.maxRetryOn429 ?? 0
+    }
+  }
+
+  // 🧮 提取 codex 使用数据
+  _getCodexUsage(account) {
+    return account?.codexUsage || null
+  }
+
+  // ✅ 检查账户是否有足够余量支撑新/粘滞会话
+  async _hasHeadroom(account, { isSticky = false } = {}) {
+    let usage = this._getCodexUsage(account)
+
+    // 粘滞映射只有 accountId/accountType 时，补充查询一次
+    if (!usage && account?.accountId && account?.accountType) {
+      try {
+        if (account.accountType === 'openai') {
+          const full = await openaiAccountService.getAccount(account.accountId)
+          usage = this._getCodexUsage(full)
+        } else if (account.accountType === 'openai-responses') {
+          const full = await openaiResponsesAccountService.getAccount(account.accountId)
+          usage = this._getCodexUsage(full)
+        }
+      } catch (e) {
+        logger.debug('⚠️ Failed to hydrate account for headroom check:', e.message)
+      }
+    }
+
+    if (!usage) return true // 无数据则不拦截
+
+    const cfg = this._getCodexSchedulingConfig()
+    const primaryRemain =
+      usage.primary?.usedPercent === null || usage.primary?.usedPercent === undefined
+        ? null
+        : 100 - usage.primary.usedPercent
+    const secondaryRemain =
+      usage.secondary?.usedPercent === null || usage.secondary?.usedPercent === undefined
+        ? null
+        : 100 - usage.secondary.usedPercent
+
+    const primaryThreshold = isSticky
+      ? cfg.headroomPrimaryStickyPercent
+      : cfg.headroomPrimaryNewPercent
+    const secondaryThreshold = isSticky
+      ? cfg.headroomSecondaryStickyPercent
+      : cfg.headroomSecondaryNewPercent
+
+    if (primaryRemain !== null && primaryRemain < primaryThreshold) return false
+    if (secondaryRemain !== null && secondaryRemain < secondaryThreshold) return false
+    return true
+  }
+
+  // 🔢 计算账户得分：兼顾“快到重置且剩余额高”的优先级
+  _computeCodexScore(account, { isSticky = false } = {}) {
+    const usage = this._getCodexUsage(account)
+    const cfg = this._getCodexSchedulingConfig()
+
+    if (!usage) {
+      // 无 Codex 头：优先调度一次以获取使用窗口信息
+      return Number.MAX_SAFE_INTEGER
+    }
+
+    const primaryRemain =
+      usage.primary?.usedPercent === null || usage.primary?.usedPercent === undefined
+        ? null
+        : 100 - usage.primary.usedPercent
+    const secondaryRemain =
+      usage.secondary?.usedPercent === null || usage.secondary?.usedPercent === undefined
+        ? null
+        : 100 - usage.secondary.usedPercent
+
+    const primaryReset = usage.primary?.resetAfterSeconds
+    const secondaryReset = usage.secondary?.resetAfterSeconds
+
+    const burnPrimary =
+      primaryRemain !== null && primaryReset
+        ? (primaryRemain / Math.max(primaryReset, 60)) * 1000 // 放大数量级，避免惩罚掩盖收益
+        : 0
+    const burnSecondary =
+      secondaryRemain !== null && secondaryReset
+        ? (secondaryRemain / Math.max(secondaryReset, 60)) * 1000 * cfg.secondaryBoost
+        : 0
+
+    let score =
+      cfg.weightPrimaryBurn * burnPrimary + cfg.weightSecondaryBurn * burnSecondary + (isSticky ? cfg.stickinessBonus : 0)
+
+    // 低余量惩罚，防止粘滞过度占用快耗尽的号
+    const primaryThreshold = isSticky
+      ? cfg.headroomPrimaryStickyPercent
+      : cfg.headroomPrimaryNewPercent
+    const secondaryThreshold = isSticky
+      ? cfg.headroomSecondaryStickyPercent
+      : cfg.headroomSecondaryNewPercent
+
+    if (primaryRemain !== null && primaryRemain < primaryThreshold) {
+      score *= 0.3 // 余量临界时打折，避免强行减法导致负分
+    }
+    if (secondaryRemain !== null && secondaryRemain < secondaryThreshold) {
+      score *= 0.6
+    }
+
+    return score
   }
 
   // 🔧 辅助方法：检查账户是否可调度（兼容字符串和布尔值）
@@ -285,7 +412,8 @@ class UnifiedOpenAIScheduler {
             mappedAccount.accountId,
             mappedAccount.accountType
           )
-          if (isAvailable) {
+          const hasHeadroom = await this._hasHeadroom(mappedAccount, { isSticky: true })
+          if (isAvailable && hasHeadroom) {
             // 🚀 智能会话续期（续期 unified 映射键，按配置）
             await this._extendSessionMappingTTL(sessionHash)
             logger.info(
@@ -296,7 +424,7 @@ class UnifiedOpenAIScheduler {
             return mappedAccount
           } else {
             logger.warn(
-              `⚠️ Mapped account ${mappedAccount.accountId} is no longer available, selecting new account`
+              `⚠️ Mapped account ${mappedAccount.accountId} dropped (available: ${isAvailable}, headroom: ${hasHeadroom}), selecting new account`
             )
             await this._deleteSessionMapping(sessionHash)
           }
@@ -321,14 +449,44 @@ class UnifiedOpenAIScheduler {
         }
       }
 
-      // 按最后使用时间排序（最久未使用的优先，与 Claude 保持一致）
-      const sortedAccounts = availableAccounts.sort((a, b) => {
+      // 先过滤余量不足的号（有数据才拦）
+      const headroomCandidates = []
+      for (const acc of availableAccounts) {
+        if (await this._hasHeadroom(acc, { isSticky: false })) {
+          headroomCandidates.push(acc)
+        }
+      }
+      if (headroomCandidates.length === 0 && availableAccounts.length > 0) {
+        logger.warn(
+          `⚠️ All ${availableAccounts.length} accounts have insufficient headroom, using fallback pool`
+        )
+      }
+      const candidatePool = headroomCandidates.length > 0 ? headroomCandidates : availableAccounts
+
+      // 评分排序：优先消耗即将重置的周/日额度，其次最久未用
+      const sortedAccounts = candidatePool.sort((a, b) => {
+        const scoreA = this._computeCodexScore(a, { isSticky: false })
+        const scoreB = this._computeCodexScore(b, { isSticky: false })
+
+        const bothFinite = Number.isFinite(scoreA) && Number.isFinite(scoreB)
+        if (bothFinite && scoreA !== scoreB) return scoreB - scoreA // 分高优先
+
+        if (bothFinite && scoreA === scoreB) {
+          // tie-break by lastUsedAt
+          const aLastUsed = new Date(a.lastUsedAt || 0).getTime()
+          const bLastUsed = new Date(b.lastUsedAt || 0).getTime()
+          return aLastUsed - bLastUsed
+        }
+
+        if (Number.isFinite(scoreA)) return -1
+        if (Number.isFinite(scoreB)) return 1
+
         const aLastUsed = new Date(a.lastUsedAt || 0).getTime()
         const bLastUsed = new Date(b.lastUsedAt || 0).getTime()
-        return aLastUsed - bLastUsed // 最久未使用的优先
+        return aLastUsed - bLastUsed
       })
 
-      // 选择第一个账户
+      // 选择得分最高的账户
       const selectedAccount = sortedAccounts[0]
 
       // 如果有会话哈希，建立新的映射
@@ -894,14 +1052,44 @@ class UnifiedOpenAIScheduler {
         throw error
       }
 
-      // 按最后使用时间排序（最久未使用的优先，与 Claude 保持一致）
-      const sortedAccounts = availableAccounts.sort((a, b) => {
+      // 使用 Codex 余量与评分算法挑选分组账户
+      const headroomAccounts = []
+      for (const acc of availableAccounts) {
+        if (await this._hasHeadroom(acc, { isSticky: false })) {
+          headroomAccounts.push(acc)
+        }
+      }
+
+      if (headroomAccounts.length === 0 && availableAccounts.length > 0) {
+        logger.warn(
+          `⚠️ Group ${group.name} has ${availableAccounts.length} members but none meet headroom, using fallback`
+        )
+      }
+
+      const candidatePool = headroomAccounts.length > 0 ? headroomAccounts : availableAccounts
+
+      const sortedAccounts = candidatePool.sort((a, b) => {
+        const scoreA = this._computeCodexScore(a, { isSticky: false })
+        const scoreB = this._computeCodexScore(b, { isSticky: false })
+
+        const bothFinite = Number.isFinite(scoreA) && Number.isFinite(scoreB)
+        if (bothFinite && scoreA !== scoreB) return scoreB - scoreA
+
+        if (bothFinite && scoreA === scoreB) {
+          const aLastUsed = new Date(a.lastUsedAt || 0).getTime()
+          const bLastUsed = new Date(b.lastUsedAt || 0).getTime()
+          return aLastUsed - bLastUsed
+        }
+
+        if (Number.isFinite(scoreA)) return -1
+        if (Number.isFinite(scoreB)) return 1
+
         const aLastUsed = new Date(a.lastUsedAt || 0).getTime()
         const bLastUsed = new Date(b.lastUsedAt || 0).getTime()
-        return aLastUsed - bLastUsed // 最久未使用的优先
+        return aLastUsed - bLastUsed
       })
 
-      // 选择第一个账户
+      // 选择得分最高的账户
       const selectedAccount = sortedAccounts[0]
 
       // 如果有会话哈希，建立新的映射
