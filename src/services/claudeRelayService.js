@@ -3,6 +3,7 @@ const zlib = require('zlib')
 const fs = require('fs')
 const path = require('path')
 const ProxyHelper = require('../utils/proxyHelper')
+const { filterForClaude } = require('../utils/headerFilter')
 const claudeAccountService = require('./claudeAccountService')
 const unifiedClaudeScheduler = require('./unifiedClaudeScheduler')
 const sessionHelper = require('../utils/sessionHelper')
@@ -13,6 +14,7 @@ const redis = require('../models/redis')
 const ClaudeCodeValidator = require('../validators/clients/claudeCodeValidator')
 const { formatDateWithTimezone } = require('../utils/dateHelper')
 const requestIdentityService = require('./requestIdentityService')
+const { createClaudeTestPayload } = require('../utils/testPayloadHelper')
 
 class ClaudeRelayService {
   constructor() {
@@ -789,7 +791,8 @@ class ClaudeRelayService {
       return total
     }
 
-    const removeFromMessages = () => {
+    // 只移除 cache_control 属性，保留内容本身，避免丢失用户消息
+    const removeCacheControlFromMessages = () => {
       if (!Array.isArray(body.messages)) {
         return false
       }
@@ -803,12 +806,8 @@ class ClaudeRelayService {
         for (let contentIndex = 0; contentIndex < message.content.length; contentIndex += 1) {
           const contentItem = message.content[contentIndex]
           if (contentItem && contentItem.cache_control) {
-            message.content.splice(contentIndex, 1)
-
-            if (message.content.length === 0) {
-              body.messages.splice(messageIndex, 1)
-            }
-
+            // 只删除 cache_control 属性，保留内容
+            delete contentItem.cache_control
             return true
           }
         }
@@ -817,7 +816,8 @@ class ClaudeRelayService {
       return false
     }
 
-    const removeFromSystem = () => {
+    // 只移除 cache_control 属性，保留 system 内容
+    const removeCacheControlFromSystem = () => {
       if (!Array.isArray(body.system)) {
         return false
       }
@@ -825,12 +825,8 @@ class ClaudeRelayService {
       for (let index = 0; index < body.system.length; index += 1) {
         const systemItem = body.system[index]
         if (systemItem && systemItem.cache_control) {
-          body.system.splice(index, 1)
-
-          if (body.system.length === 0) {
-            delete body.system
-          }
-
+          // 只删除 cache_control 属性，保留内容
+          delete systemItem.cache_control
           return true
         }
       }
@@ -841,12 +837,13 @@ class ClaudeRelayService {
     let total = countCacheControlBlocks()
 
     while (total > MAX_CACHE_CONTROL_BLOCKS) {
-      if (removeFromMessages()) {
+      // 优先从 messages 中移除 cache_control，再从 system 中移除
+      if (removeCacheControlFromMessages()) {
         total -= 1
         continue
       }
 
-      if (removeFromSystem()) {
+      if (removeCacheControlFromSystem()) {
         total -= 1
         continue
       }
@@ -881,62 +878,9 @@ class ClaudeRelayService {
 
   // 🔧 过滤客户端请求头
   _filterClientHeaders(clientHeaders) {
-    // 需要移除的敏感 headers
-    const sensitiveHeaders = [
-      'content-type',
-      'user-agent',
-      'x-api-key',
-      'authorization',
-      'x-authorization',
-      'host',
-      'content-length',
-      'connection',
-      'proxy-authorization',
-      'content-encoding',
-      'transfer-encoding'
-    ]
-
-    // 🆕 需要移除的浏览器相关 headers（避免CORS问题）
-    const browserHeaders = [
-      'origin',
-      'referer',
-      'sec-fetch-mode',
-      'sec-fetch-site',
-      'sec-fetch-dest',
-      'sec-ch-ua',
-      'sec-ch-ua-mobile',
-      'sec-ch-ua-platform',
-      'accept-language',
-      'accept-encoding',
-      'accept',
-      'cache-control',
-      'pragma',
-      'anthropic-dangerous-direct-browser-access' // 这个头可能触发CORS检查
-    ]
-
-    // 应该保留的 headers（用于会话一致性和追踪）
-    const allowedHeaders = [
-      'x-request-id',
-      'anthropic-version', // 保留API版本
-      'anthropic-beta' // 保留beta功能
-    ]
-
-    const filteredHeaders = {}
-
-    // 转发客户端的非敏感 headers
-    Object.keys(clientHeaders || {}).forEach((key) => {
-      const lowerKey = key.toLowerCase()
-      // 如果在允许列表中，直接保留
-      if (allowedHeaders.includes(lowerKey)) {
-        filteredHeaders[key] = clientHeaders[key]
-      }
-      // 如果不在敏感列表和浏览器列表中，也保留
-      else if (!sensitiveHeaders.includes(lowerKey) && !browserHeaders.includes(lowerKey)) {
-        filteredHeaders[key] = clientHeaders[key]
-      }
-    })
-
-    return filteredHeaders
+    // 使用统一的 headerFilter 工具类 - 移除 CDN、浏览器和代理相关 headers
+    // 同时伪装成正常的直接客户端请求，避免触发上游 API 的安全检查
+    return filterForClaude(clientHeaders)
   }
 
   _applyRequestIdentityTransform(body, headers, context = {}) {
@@ -2249,26 +2193,7 @@ class ClaudeRelayService {
 
   // 🧪 测试账号连接（供Admin API使用，直接复用 _makeClaudeStreamRequestWithUsageCapture）
   async testAccountConnection(accountId, responseStream) {
-    const testRequestBody = {
-      model: 'claude-sonnet-4-5-20250929',
-      max_tokens: 100,
-      stream: true,
-      system: [
-        {
-          type: 'text',
-          text: this.claudeCodeSystemPrompt,
-          cache_control: {
-            type: 'ephemeral'
-          }
-        }
-      ],
-      messages: [
-        {
-          role: 'user',
-          content: 'hi'
-        }
-      ]
-    }
+    const testRequestBody = createClaudeTestPayload('claude-sonnet-4-5-20250929', { stream: true })
 
     try {
       // 获取账户信息
