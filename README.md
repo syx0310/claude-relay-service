@@ -502,6 +502,22 @@ requires_openai_auth = true
 
 > ⚠️ 在通过 Nginx 反向代理 CRS 服务并使用 Codex CLI 时，需要在 http 块中添加 underscores_in_headers on;。因为 Nginx 默认会移除带下划线的请求头（如 session_id），一旦该头被丢弃，多账号环境下的粘性会话功能将失效。
 
+**Codex instructions 适配（服务端，可选）：**
+
+默认情况下，CRS 会对“非 Codex CLI”请求的 `/openai/responses` 自动注入/覆盖 `instructions`（并清理部分字段）以提升对 Codex 上游端点的兼容性。你可以通过配置切换三种模式：
+
+```js
+// config/config.js（示例）
+openai: {
+  codexAdapter: {
+    instructions: { mode: 'prepend' }, // overwrite | prepend | none
+    stripFields: { enabled: true }
+  }
+}
+```
+
+也可通过环境变量配置（见 `.env.example`）：`OPENAI_CODEX_ADAPTER_INSTRUCTIONS_MODE=prepend|overwrite|none`。
+
 **Droid CLI 配置：**
 
 Droid CLI 读取 `~/.factory/config.json`。可以在该文件中添加自定义模型以指向本服务的新端点：

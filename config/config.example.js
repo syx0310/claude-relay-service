@@ -104,6 +104,29 @@ const config = {
   // ⏱️ 请求超时配置
   requestTimeout: parseInt(process.env.REQUEST_TIMEOUT) || 600000, // 默认 10 分钟
 
+  // 🔷 OpenAI / Codex 转发适配配置（/openai/responses）
+  openai: {
+    codexAdapter: {
+      // 总开关：false 则完全不做任何非 Codex 适配
+      enabled: process.env.OPENAI_CODEX_ADAPTER_ENABLED !== 'false',
+      instructions: {
+        // 可选: overwrite | prepend | none
+        // - overwrite: 覆盖为服务端默认（或配置的）instructions
+        // - prepend: 前置服务端 instructions，再拼接客户端原 instructions
+        // - none: 不注入/不覆盖 instructions（完全透传）
+        mode: process.env.OPENAI_CODEX_ADAPTER_INSTRUCTIONS_MODE || 'overwrite',
+        // 可选: non_codex | all（默认 non_codex，仅对非 Codex CLI 请求生效）
+        applyWhen: process.env.OPENAI_CODEX_ADAPTER_INSTRUCTIONS_APPLY_WHEN || 'non_codex'
+        // text: '...可选：自定义 instructions 文本（建议在 config.js 中配置，避免 env 超长）'
+      },
+      stripFields: {
+        // 非 Codex 客户端字段清理开关（默认开启），用于移除不被 Codex 上游接受的字段
+        enabled: process.env.OPENAI_CODEX_ADAPTER_STRIP_FIELDS_ENABLED !== 'false'
+        // fields: ['temperature', 'top_p', ...] // 可选：自定义清理字段列表
+      }
+    }
+  },
+
   // 📈 使用限制
   limits: {
     defaultTokenLimit: parseInt(process.env.DEFAULT_TOKEN_LIMIT) || 1000000
