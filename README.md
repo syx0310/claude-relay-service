@@ -504,7 +504,7 @@ requires_openai_auth = true
 
 **Codex instructions 适配（服务端，可选）：**
 
-默认情况下，CRS 会对“非 Codex CLI”请求的 `/openai/responses` 自动注入/覆盖 `instructions`（并清理部分字段）以提升对 Codex 上游端点的兼容性。你可以通过配置切换三种模式：
+默认情况下，CRS 会对“非 Codex CLI”请求的 `/openai/responses` 自动注入/覆盖 `instructions`（并清理部分字段）以提升对 Codex 上游端点的兼容性。你可以通过配置切换三种模式（当 `instructions` 为空/缺失时会 fallback 到默认值）：
 
 ```js
 // config/config.js（示例）

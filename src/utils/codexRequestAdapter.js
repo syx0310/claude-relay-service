@@ -97,30 +97,35 @@ function adaptCodexRequestBody(body, { isCodexCLI, adapterConfig, defaultInstruc
     }
   }
 
-  const shouldApplyInstructions =
-    settings.instructions.mode !== 'none' &&
-    isNonEmptyString(settings.instructions.text) &&
-    (settings.instructions.applyWhen === 'all' || !isCodexCLI)
+  const scopeAllowsInstructions = settings.instructions.applyWhen === 'all' || !isCodexCLI
+  const hasServerInstructions = isNonEmptyString(settings.instructions.text)
+  const clientInstructions = typeof body.instructions === 'string' ? body.instructions : ''
+  const hasClientInstructions = isNonEmptyString(clientInstructions)
 
-  if (shouldApplyInstructions) {
+  if (scopeAllowsInstructions && hasServerInstructions) {
     if (settings.instructions.mode === 'overwrite') {
       processedBody.instructions = settings.instructions.text
       changes.instructions = { mode: 'overwrite' }
     } else if (settings.instructions.mode === 'prepend') {
-      const clientText = typeof body.instructions === 'string' ? body.instructions : ''
       const alreadyPresent =
-        clientText.startsWith(settings.instructions.text) ||
-        clientText.trimStart().startsWith(settings.instructions.text)
+        clientInstructions.startsWith(settings.instructions.text) ||
+        clientInstructions.trimStart().startsWith(settings.instructions.text)
 
-      if (clientText && alreadyPresent) {
+      if (hasClientInstructions && alreadyPresent) {
         processedBody.instructions = body.instructions
         changes.instructions = { mode: 'prepend', alreadyPresent: true }
-      } else if (clientText && clientText.trim()) {
-        processedBody.instructions = `${settings.instructions.text}\n\n${clientText}`
+      } else if (hasClientInstructions) {
+        processedBody.instructions = `${settings.instructions.text}\n\n${clientInstructions}`
         changes.instructions = { mode: 'prepend', alreadyPresent: false }
       } else {
         processedBody.instructions = settings.instructions.text
         changes.instructions = { mode: 'prepend', alreadyPresent: false, clientMissing: true }
+      }
+    } else if (settings.instructions.mode === 'none') {
+      // "none" means do not override non-empty client instructions, but ensure we don't pass empty/blank.
+      if (!hasClientInstructions) {
+        processedBody.instructions = settings.instructions.text
+        changes.instructions = { mode: 'none', clientMissing: true, fallback: true }
       }
     }
   }
@@ -133,4 +138,3 @@ module.exports = {
   DEFAULT_NON_CODEX_FIELDS_TO_REMOVE,
   adaptCodexRequestBody
 }
-

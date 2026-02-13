@@ -284,7 +284,12 @@ const handleResponses = async (req, res) => {
     })
 
     if (adapterResult.applied) {
-      const instructionsMode = adapterResult.changes.instructions?.mode || 'none'
+      const instructionsChange = adapterResult.changes.instructions
+      const instructionsModeRaw = instructionsChange?.mode || 'none'
+      const instructionsMode =
+        instructionsChange && instructionsChange.fallback
+          ? `${instructionsModeRaw}(fallback)`
+          : instructionsModeRaw
       const strippedCount = adapterResult.changes.strippedFields.length
       logger.info(
         clientLabel +

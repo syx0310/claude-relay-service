@@ -113,7 +113,7 @@ const config = {
         // 可选: overwrite | prepend | none
         // - overwrite: 覆盖为服务端默认（或配置的）instructions
         // - prepend: 前置服务端 instructions，再拼接客户端原 instructions
-        // - none: 不注入/不覆盖 instructions（完全透传）
+        // - none: 不覆盖已有 instructions；若为空/缺失则 fallback 到服务端默认 instructions
         mode: process.env.OPENAI_CODEX_ADAPTER_INSTRUCTIONS_MODE || 'overwrite',
         // 可选: non_codex | all（默认 non_codex，仅对非 Codex CLI 请求生效）
         applyWhen: process.env.OPENAI_CODEX_ADAPTER_INSTRUCTIONS_APPLY_WHEN || 'non_codex'

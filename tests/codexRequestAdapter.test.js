@@ -68,6 +68,22 @@ describe('codexRequestAdapter', () => {
     expect(result.body.temperature).toBeUndefined()
   })
 
+  it('none: should fallback to server instructions when client instructions is empty', () => {
+    const input = { instructions: '   ' }
+
+    const result = adaptCodexRequestBody(input, {
+      isCodexCLI: false,
+      adapterConfig: {
+        instructions: { mode: 'none', text: 'SERVER' },
+        stripFields: { enabled: false }
+      },
+      defaultInstructionsText: 'DEFAULT'
+    })
+
+    expect(result.applied).toBe(true)
+    expect(result.body.instructions).toBe('SERVER')
+  })
+
   it('codex cli: should not apply instructions by default (applyWhen=non_codex)', () => {
     const input = { instructions: 'CLIENT', temperature: 1 }
 
@@ -102,4 +118,3 @@ describe('codexRequestAdapter', () => {
     expect(result.body.temperature).toBe(1)
   })
 })
-
