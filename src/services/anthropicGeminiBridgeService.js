@@ -2326,7 +2326,7 @@ async function handleAnthropicMessagesToGemini(req, res, { vendor, baseModel }) 
     // [大东的 2.0 补丁 - 修复版] 活跃度看门狗 (Watchdog)
     // ========================================================================
     let activityTimeout = null
-    const STREAM_ACTIVITY_TIMEOUT_MS = 45000 // 45秒无数据视为卡死
+    const STREAM_ACTIVITY_TIMEOUT_MS = 90000 // 90秒无数据视为卡死
 
     const resetActivityTimeout = () => {
       if (activityTimeout) {
