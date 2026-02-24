@@ -25,6 +25,7 @@ const {
   handleAnthropicMessagesToGemini,
   handleAnthropicCountTokensToGemini
 } = require('../services/anthropicGeminiBridgeService')
+const { handleAnthropicMessagesToCodex } = require('../services/anthropicCodexBridgeService')
 const router = express.Router()
 
 function queueRateLimitUpdate(
@@ -206,6 +207,22 @@ async function handleMessagesRequest(req, res) {
     if (forcedVendor === 'gemini-cli' || forcedVendor === 'antigravity') {
       const baseModel = (req.body.model || '').trim()
       return await handleAnthropicMessagesToGemini(req, res, { vendor: forcedVendor, baseModel })
+    }
+
+    // Codex vendor prefix: codex,<model> → 桥接到 OpenAI Codex Responses API
+    const { vendor: modelVendor, baseModel: modelBase } = parseVendorPrefixedModel(
+      req.body.model || ''
+    )
+    if (modelVendor === 'codex') {
+      if (!apiKeyService.hasPermission(req.apiKey?.permissions, 'openai')) {
+        return res.status(403).json({
+          error: {
+            type: 'permission_error',
+            message: 'This API Key does not have permission to access Codex'
+          }
+        })
+      }
+      return await handleAnthropicMessagesToCodex(req, res, { baseModel: modelBase })
     }
 
     // 检查是否为流式请求
@@ -1490,6 +1507,12 @@ router.post('/v1/messages/count_tokens', authenticateApiKey, async (req, res) =>
 
   if (requiredService === 'gemini') {
     return await handleAnthropicCountTokensToGemini(req, res, { vendor: forcedVendor })
+  }
+
+  // Codex has no count_tokens API — return zero immediately
+  const { vendor: ctVendor } = parseVendorPrefixedModel(req.body?.model || '')
+  if (ctVendor === 'codex') {
+    return res.status(200).json({ input_tokens: 0 })
   }
 
   // 🔗 会话绑定验证（与 messages 端点保持一致）
