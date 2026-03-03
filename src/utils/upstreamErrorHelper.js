@@ -331,9 +331,46 @@ const sanitizeErrorForClient = (errorData) => {
   }
 }
 
+// 批量检查多个账户的临时不可用状态（单次 pipeline，避免 N 次串行 EXISTS）
+const batchIsTempUnavailable = async (accountChecks) => {
+  if (!accountChecks || accountChecks.length === 0) {
+    return new Map()
+  }
+
+  try {
+    const redis = getRedis()
+    const client = redis.getClientSafe()
+
+    const keys = accountChecks.map(
+      ({ accountId, accountType }) => `${TEMP_UNAVAILABLE_PREFIX}:${accountType}:${accountId}`
+    )
+
+    const pipeline = client.pipeline()
+    keys.forEach((key) => pipeline.exists(key))
+    const results = await pipeline.exec()
+
+    const statusMap = new Map()
+    accountChecks.forEach(({ accountId, accountType }, index) => {
+      const [err, exists] = results[index]
+      statusMap.set(`${accountType}:${accountId}`, !err && exists === 1)
+    })
+
+    return statusMap
+  } catch (error) {
+    logger.error('❌ [UpstreamError] Failed to batch check temp unavailable statuses:', error)
+    // 出错时返回所有账户可用（安全回退）
+    const statusMap = new Map()
+    accountChecks.forEach(({ accountId, accountType }) => {
+      statusMap.set(`${accountType}:${accountId}`, false)
+    })
+    return statusMap
+  }
+}
+
 module.exports = {
   markTempUnavailable,
   isTempUnavailable,
+  batchIsTempUnavailable,
   clearTempUnavailable,
   getAllTempUnavailable,
   classifyError,

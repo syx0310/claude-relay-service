@@ -721,8 +721,8 @@ async function getAllAccounts() {
       // 时间戳改由 codexUsage.updatedAt 暴露
       delete accountData.codexUsageUpdatedAt
 
-      // 获取限流状态信息
-      const rateLimitInfo = await getAccountRateLimitInfo(accountData.id)
+      // 获取限流状态信息（使用已加载的数据，避免冗余 Redis 读取）
+      const rateLimitInfo = _computeRateLimitInfoFromData(accountData)
 
       // 解析代理配置
       if (accountData.proxy) {
@@ -784,6 +784,45 @@ async function getAllAccounts() {
   return accounts
 }
 
+// 调度器专用的轻量级账户加载（仅解密调度必需字段，跳过 UI 格式化和冗余查询）
+async function getAllAccountsForScheduler() {
+  const accountIds = await redisClient.getAllIdsByIndex(
+    'openai:account:index',
+    `${OPENAI_ACCOUNT_KEY_PREFIX}*`,
+    /^openai:account:(.+)$/
+  )
+  const keys = accountIds.map((id) => `${OPENAI_ACCOUNT_KEY_PREFIX}${id}`)
+  const dataList = await redisClient.batchHgetallChunked(keys)
+
+  const accounts = []
+  for (let i = 0; i < keys.length; i++) {
+    const accountData = dataList[i]
+    if (accountData && Object.keys(accountData).length > 0) {
+      // 仅解密调度必需的字段
+      if (accountData.refreshToken) {
+        accountData.refreshToken = decrypt(accountData.refreshToken)
+      }
+
+      // 解析代理配置
+      if (accountData.proxy && typeof accountData.proxy === 'string') {
+        try {
+          accountData.proxy = JSON.parse(accountData.proxy)
+        } catch (e) {
+          accountData.proxy = null
+        }
+      }
+
+      // 转换布尔字段（保持与 getAllAccounts 一致的类型）
+      accountData.isActive = accountData.isActive === 'true'
+      accountData.schedulable = accountData.schedulable !== 'false'
+
+      accounts.push(accountData)
+    }
+  }
+
+  return accounts
+}
+
 // 获取单个账户的概要信息（用于外部展示基本状态）
 async function getAccountOverview(accountId) {
   const client = redisClient.getClientSafe()
@@ -794,7 +833,8 @@ async function getAccountOverview(accountId) {
   }
 
   const codexUsage = buildCodexUsageSnapshot(accountData)
-  const rateLimitInfo = await getAccountRateLimitInfo(accountId)
+  // 使用已加载的数据计算限流信息，避免冗余 Redis 读取
+  const rateLimitInfo = _computeRateLimitInfoFromData(accountData)
 
   if (accountData.proxy) {
     try {
@@ -1128,16 +1168,15 @@ async function toggleSchedulable(accountId) {
   }
 }
 
-// 获取账户限流信息
-async function getAccountRateLimitInfo(accountId) {
-  const account = await getAccount(accountId)
-  if (!account) {
+// 纯内存计算限流信息（避免冗余 Redis 读取）
+function _computeRateLimitInfoFromData(accountData) {
+  if (!accountData) {
     return null
   }
 
-  const status = account.rateLimitStatus || 'normal'
-  const rateLimitedAt = account.rateLimitedAt || null
-  const rateLimitResetAt = account.rateLimitResetAt || null
+  const status = accountData.rateLimitStatus || 'normal'
+  const rateLimitedAt = accountData.rateLimitedAt || null
+  const rateLimitResetAt = accountData.rateLimitResetAt || null
 
   if (status === 'limited') {
     const now = Date.now()
@@ -1170,6 +1209,12 @@ async function getAccountRateLimitInfo(accountId) {
     rateLimitResetAt,
     minutesRemaining: 0
   }
+}
+
+// 获取账户限流信息
+async function getAccountRateLimitInfo(accountId) {
+  const account = await getAccount(accountId)
+  return _computeRateLimitInfoFromData(account)
 }
 
 // 更新账户使用统计（tokens参数可选，默认为0，仅更新最后使用时间）
@@ -1237,6 +1282,7 @@ module.exports = {
   updateAccount,
   deleteAccount,
   getAllAccounts,
+  getAllAccountsForScheduler,
   selectAvailableAccount,
   refreshAccountToken,
   isTokenExpired,
