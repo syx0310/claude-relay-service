@@ -621,6 +621,24 @@ class Application {
       this.server.keepAliveTimeout = serverTimeout + 5000 // keepAlive 稍长一点
       logger.info(`⏱️  Server timeout set to ${serverTimeout}ms (${serverTimeout / 1000}s)`)
 
+      // Codex WebSocket 代理
+      const codexWsRelayService = require('./services/relay/codexWebSocketRelayService')
+      codexWsRelayService.initialize()
+
+      this.server.on('upgrade', (req, socket, head) => {
+        const pathname = (req.url || '').split('?')[0]
+        const isCodexWsPath =
+          pathname === '/openai/v1/responses' ||
+          pathname === '/openai/responses' ||
+          pathname === '/v1/responses'
+
+        if (isCodexWsPath) {
+          codexWsRelayService.handleUpgrade(req, socket, head)
+        } else {
+          socket.destroy()
+        }
+      })
+
       // 🔄 定期清理任务
       this.startCleanupTasks()
 
@@ -832,6 +850,15 @@ class Application {
   setupGracefulShutdown() {
     const shutdown = async (signal) => {
       logger.info(`🛑 Received ${signal}, starting graceful shutdown...`)
+
+      // 关闭 WebSocket 连接（在 HTTP server close 之前）
+      try {
+        const codexWsRelayService = require('./services/relay/codexWebSocketRelayService')
+        codexWsRelayService.shutdown()
+        logger.info('🔌 WebSocket connections closed')
+      } catch (error) {
+        logger.error('❌ Error closing WebSocket connections:', error)
+      }
 
       if (this.server) {
         this.server.close(async () => {
