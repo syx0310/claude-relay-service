@@ -55,7 +55,11 @@ function resolveAdapterConfig(rawConfig, defaultInstructionsText) {
 
   return {
     enabled,
-    instructions: { mode: instructionsMode, applyWhen: instructionsApplyWhen, text: instructionsText },
+    instructions: {
+      mode: instructionsMode,
+      applyWhen: instructionsApplyWhen,
+      text: instructionsText
+    },
     stripFields: { enabled: stripFieldsEnabled, fields: stripFieldsFields }
   }
 }

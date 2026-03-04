@@ -32,12 +32,12 @@ describe('codexRequestAdapter', () => {
     })
 
     expect(result.applied).toBe(true)
-    expect(result.body.instructions).toBe('SERVER\\n\\nCLIENT')
+    expect(result.body.instructions).toBe('SERVER\n\nCLIENT')
     expect(result.body.foo).toBe('bar')
   })
 
   it('prepend: should not duplicate when already prefixed', () => {
-    const input = { instructions: 'SERVER\\n\\nCLIENT' }
+    const input = { instructions: 'SERVER\n\nCLIENT' }
 
     const result = adaptCodexRequestBody(input, {
       isCodexCLI: false,
@@ -48,7 +48,7 @@ describe('codexRequestAdapter', () => {
     })
 
     expect(result.applied).toBe(true)
-    expect(result.body.instructions).toBe('SERVER\\n\\nCLIENT')
+    expect(result.body.instructions).toBe('SERVER\n\nCLIENT')
   })
 
   it('none: should not modify instructions, but can still strip fields', () => {

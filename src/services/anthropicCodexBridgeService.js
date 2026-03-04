@@ -64,14 +64,18 @@ function normalizeHeaders(headers = {}) {
   }
   const normalized = {}
   for (const [key, value] of Object.entries(headers)) {
-    if (!key) continue
+    if (!key) {
+      continue
+    }
     normalized[key.toLowerCase()] = Array.isArray(value) ? value[0] : value
   }
   return normalized
 }
 
 function toNumberSafe(value) {
-  if (value === undefined || value === null || value === '') return null
+  if (value === undefined || value === null || value === '') {
+    return null
+  }
   const num = Number(value)
   return Number.isFinite(num) ? num : null
 }
@@ -81,7 +85,9 @@ function toNumberSafe(value) {
  */
 function extractCodexUsageHeaders(headers) {
   const normalized = normalizeHeaders(headers)
-  if (!normalized || Object.keys(normalized).length === 0) return null
+  if (!normalized || Object.keys(normalized).length === 0) {
+    return null
+  }
 
   const snapshot = {
     primaryUsedPercent: toNumberSafe(normalized['x-codex-primary-used-percent']),
@@ -108,22 +114,32 @@ function extractCodexUsageHeaders(headers) {
  * 过滤掉 billing header 和 system-reminder 元素
  */
 function extractInstructionsFromSystem(system) {
-  if (!system) return ''
+  if (!system) {
+    return ''
+  }
 
   if (typeof system === 'string') {
-    if (system.trim().startsWith('x-anthropic-billing-header')) return ''
+    if (system.trim().startsWith('x-anthropic-billing-header')) {
+      return ''
+    }
     return system
   }
 
   if (Array.isArray(system)) {
     const parts = []
     for (const item of system) {
-      if (!item || item.type !== 'text' || typeof item.text !== 'string') continue
+      if (!item || item.type !== 'text' || typeof item.text !== 'string') {
+        continue
+      }
       const trimmed = item.text.trim()
       // 过滤 billing header
-      if (trimmed.startsWith('x-anthropic-billing-header')) continue
+      if (trimmed.startsWith('x-anthropic-billing-header')) {
+        continue
+      }
       // 过滤 system-reminder
-      if (trimmed.startsWith('<system-reminder>')) continue
+      if (trimmed.startsWith('<system-reminder>')) {
+        continue
+      }
       parts.push(item.text)
     }
     return parts.join('\n\n')
@@ -199,9 +215,15 @@ function convertMessagesToCodexInput(messages) {
  * 归一化 content 为 block 数组
  */
 function normalizeContent(content) {
-  if (!content) return []
-  if (typeof content === 'string') return [{ type: 'text', text: content }]
-  if (Array.isArray(content)) return content
+  if (!content) {
+    return []
+  }
+  if (typeof content === 'string') {
+    return [{ type: 'text', text: content }]
+  }
+  if (Array.isArray(content)) {
+    return content
+  }
   return []
 }
 
@@ -209,7 +231,9 @@ function normalizeContent(content) {
  * 转换 Anthropic tools → Codex tools (function 格式)
  */
 function convertToolsToCodex(tools) {
-  if (!Array.isArray(tools) || tools.length === 0) return undefined
+  if (!Array.isArray(tools) || tools.length === 0) {
+    return undefined
+  }
 
   return tools.map((tool) => ({
     type: 'function',
@@ -223,18 +247,30 @@ function convertToolsToCodex(tools) {
  * 转换 Anthropic tool_choice → Codex tool_choice
  */
 function convertToolChoiceToCodex(toolChoice) {
-  if (!toolChoice) return undefined
+  if (!toolChoice) {
+    return undefined
+  }
 
   if (typeof toolChoice === 'string') {
-    if (toolChoice === 'auto') return 'auto'
-    if (toolChoice === 'any') return 'required'
-    if (toolChoice === 'none') return 'none'
+    if (toolChoice === 'auto') {
+      return 'auto'
+    }
+    if (toolChoice === 'any') {
+      return 'required'
+    }
+    if (toolChoice === 'none') {
+      return 'none'
+    }
     return toolChoice
   }
 
   if (typeof toolChoice === 'object') {
-    if (toolChoice.type === 'auto') return 'auto'
-    if (toolChoice.type === 'any') return 'required'
+    if (toolChoice.type === 'auto') {
+      return 'auto'
+    }
+    if (toolChoice.type === 'any') {
+      return 'required'
+    }
     if (toolChoice.type === 'tool' && toolChoice.name) {
       return { type: 'function', name: toolChoice.name }
     }
@@ -456,7 +492,9 @@ class CodexToAnthropicStreamConverter {
    * 发送 message_start 事件（只发一次）
    */
   _ensureMessageStart() {
-    if (this.messageStartSent) return
+    if (this.messageStartSent) {
+      return
+    }
     this.messageStartSent = true
 
     writeAnthropicSseEvent(this.res, 'message_start', {
@@ -483,7 +521,9 @@ class CodexToAnthropicStreamConverter {
    * 处理一个 Codex SSE 事件
    */
   processEvent(event) {
-    if (!event || !event.type) return
+    if (!event || !event.type) {
+      return
+    }
 
     switch (event.type) {
       case 'response.created':
@@ -695,7 +735,9 @@ class CodexToAnthropicStreamConverter {
 
   _getAnthropicToolId(codexCallId) {
     for (const [anthropicId, mappedCodexId] of this.toolIdMap.entries()) {
-      if (mappedCodexId === codexCallId) return anthropicId
+      if (mappedCodexId === codexCallId) {
+        return anthropicId
+      }
     }
     return null
   }
@@ -823,9 +865,9 @@ async function handleAnthropicMessagesToCodex(req, res, { baseModel }) {
     )
 
     logger.info(
-      `🔀 [CodexBridge] Processing request: model=${actualModel}` +
-        (actualModel !== baseModel ? ` (from ${baseModel})` : '') +
-        `, stream=${isStream}`
+      `🔀 [CodexBridge] Processing request: model=${actualModel}${
+        actualModel !== baseModel ? ` (from ${baseModel})` : ''
+      }, stream=${isStream}`
     )
 
     // 1. 生成会话哈希
@@ -839,7 +881,7 @@ async function handleAnthropicMessagesToCodex(req, res, { baseModel }) {
     // 4. 如果是 openai-responses 账户，直接使用 account.baseApi + /v1/responses
     //    如果是普通 openai 账户，使用 chatgpt.com/backend-api/codex/responses
     let endpoint
-    let headers = {}
+    const headers = {}
 
     if (accountType === 'openai-responses') {
       const baseApi = (account.baseApi || '').replace(/\/+$/, '')
@@ -992,7 +1034,9 @@ async function handleAnthropicMessagesToCodex(req, res, { baseModel }) {
               parsed?.message ||
               errorMessage
           } catch {
-            if (errorBody) errorMessage = errorBody.slice(0, 500)
+            if (errorBody) {
+              errorMessage = errorBody.slice(0, 500)
+            }
           }
           res.status(upstream.status).json({
             error: { type: 'api_error', message: errorMessage }
@@ -1284,7 +1328,7 @@ async function handleNonStreamResponse(
   const anthropicResponse = convertCodexResponseToAnthropic(codexResponse, baseModel, toolIdMap)
 
   // 记录使用统计
-  const usage = anthropicResponse.usage
+  const { usage } = anthropicResponse
   if (usage && (usage.input_tokens > 0 || usage.output_tokens > 0)) {
     try {
       await apiKeyService.recordUsage(
@@ -1397,7 +1441,7 @@ async function handleUnauthorizedError(
   sessionHash,
   res
 ) {
-  const status = upstream.status
+  const { status } = upstream
   logger.warn(
     `🔐 [CodexBridge] ${status === 401 ? 'Unauthorized' : 'Payment required'} for account ${accountId}`
   )
