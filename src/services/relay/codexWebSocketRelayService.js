@@ -147,6 +147,9 @@ class CodexWebSocketRelayService {
       proxy: null,
       // Turn 跟踪
       currentTurnHasOutput: false,
+      // 429 静默切号
+      lastClientMessage: null,
+      retryCount: 0,
       // 计时器
       idleTimer: null,
       lifetimeTimer: null,
@@ -247,6 +250,10 @@ class CodexWebSocketRelayService {
     }
 
     messageToSend = JSON.stringify(parsed)
+
+    // 保存处理后的消息（用于 429 静默切号重发）
+    connState.lastClientMessage = messageToSend
+    connState.retryCount = 0
 
     // 转发给上游
     if (connState.upstreamWs?.readyState === WebSocket.OPEN) {
@@ -463,7 +470,20 @@ class CodexWebSocketRelayService {
 
     const messageStr = data.toString()
 
-    // 先转发给客户端（低延迟）
+    // 检查是否为 429 error event — 静默切号，不转发给客户端
+    try {
+      const parsed = JSON.parse(messageStr)
+      if (parsed.type === 'error' && (parsed.status === 429 || parsed.status_code === 429)) {
+        this._handleSilentAccountSwitch(clientWs, connState, parsed, messageStr).catch((err) => {
+          logger.error(`❌ [CodexWS] Silent account switch failed: ${err.message}`)
+        })
+        return // 不转发 429 给客户端
+      }
+    } catch {
+      // 非 JSON，继续正常转发
+    }
+
+    // 正常转发给客户端
     this._sendToClient(clientWs, messageStr)
 
     // 重置空闲计时器
@@ -619,7 +639,64 @@ class CodexWebSocketRelayService {
         }
       }
 
+      // 删除 session 映射，确保下次消息重选账户
+      if (connState.sessionHash) {
+        await unifiedOpenAIScheduler._deleteSessionMapping(connState.sessionHash).catch(() => {})
+      }
       this._detachUpstream(connState)
+    }
+  }
+
+  /**
+   * 429 静默切号：拦截 429 error event，自动切换账户重发请求，客户端无感
+   */
+  async _handleSilentAccountSwitch(clientWs, connState, errorEvent, rawMessage) {
+    const MAX_SWITCH_RETRIES = 3
+    connState.retryCount = (connState.retryCount || 0) + 1
+
+    if (connState.retryCount > MAX_SWITCH_RETRIES || !connState.lastClientMessage) {
+      // 超过重试次数或无消息可重发 → 转发 429 给客户端
+      logger.warn(
+        `🚫 [CodexWS] 429 exhausted ${connState.retryCount} retries, forwarding to client`
+      )
+      this._sendToClient(clientWs, rawMessage)
+      this._processUpstreamEvent(clientWs, connState, rawMessage).catch(() => {})
+      return
+    }
+
+    const resetsInSeconds = errorEvent.error?.resets_in_seconds || null
+    logger.info(
+      `🔄 [CodexWS] 429 on account ${connState.accountId}, silent switch attempt ${connState.retryCount}/${MAX_SWITCH_RETRIES}${resetsInSeconds ? ` (resets in ${resetsInSeconds}s)` : ''}`
+    )
+
+    // 1. 标记账户限流（内部会删 session 映射）
+    try {
+      await unifiedOpenAIScheduler.markAccountRateLimited(
+        connState.accountId,
+        connState.accountType,
+        connState.sessionHash,
+        resetsInSeconds
+      )
+    } catch {
+      // ignore
+    }
+
+    // 2. 断开当前上游
+    this._detachUpstream(connState)
+
+    // 3. 用 lastClientMessage 重建上游连接并重发
+    try {
+      const parsed = JSON.parse(connState.lastClientMessage)
+      await this._establishUpstream(clientWs, connState, parsed)
+
+      if (connState.upstreamWs?.readyState === WebSocket.OPEN) {
+        connState.upstreamWs.send(connState.lastClientMessage)
+        logger.info(`✅ [CodexWS] Silent switch to account ${connState.accountId}, message resent`)
+      }
+    } catch (error) {
+      // 无可用账户 → 转发 429 给客户端
+      logger.warn(`🚫 [CodexWS] No account available for silent switch: ${error.message}`)
+      this._sendToClient(clientWs, rawMessage)
     }
   }
 

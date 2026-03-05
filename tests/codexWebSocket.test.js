@@ -40,7 +40,8 @@ const mockScheduler = {
   selectAccountForApiKey: jest.fn(),
   markAccountRateLimited: jest.fn(),
   removeAccountRateLimit: jest.fn(),
-  isAccountRateLimited: jest.fn()
+  isAccountRateLimited: jest.fn(),
+  _deleteSessionMapping: jest.fn()
 }
 jest.mock('../src/services/scheduler/unifiedOpenAIScheduler', () => mockScheduler)
 
@@ -493,32 +494,63 @@ describe('CodexWebSocketRelayService', () => {
     })
   })
 
-  describe('429 rate limit and account switching', () => {
-    it('forwards 429 error event to client and marks account as rate limited', async () => {
+  describe('429 silent account switching', () => {
+    it('silently switches account on 429 — client receives normal response', async () => {
       const clientWs = await connectClient()
 
-      mockUpstreamServer.once('connection', (upstreamWs) => {
-        upstreamWs.once('message', () => {
-          upstreamWs.send(
-            JSON.stringify({
-              type: 'error',
-              status: 429,
-              error: { message: 'Rate limited', resets_in_seconds: 60 }
-            })
-          )
-        })
+      let connectionCount = 0
+      // First upstream: returns 429; Second upstream: returns success
+      mockUpstreamServer.on('connection', (upstreamWs) => {
+        connectionCount++
+        if (connectionCount === 1) {
+          // First account: 429
+          upstreamWs.once('message', () => {
+            upstreamWs.send(
+              JSON.stringify({
+                type: 'error',
+                status: 429,
+                error: { message: 'Rate limited', resets_in_seconds: 60 }
+              })
+            )
+          })
+        } else {
+          // Second account: success
+          upstreamWs.once('message', () => {
+            upstreamWs.send(
+              JSON.stringify({ type: 'response.created', response: { id: 'resp-ok' } })
+            )
+          })
+        }
       })
+
+      // Setup second account for retry
+      mockScheduler.selectAccountForApiKey
+        .mockResolvedValueOnce({ accountId: 'acc-1', accountType: 'openai-responses' })
+        .mockResolvedValueOnce({ accountId: 'acc-2', accountType: 'openai-responses' })
+      mockOpenaiResponsesAccountService.getAccount
+        .mockResolvedValueOnce({
+          id: 'acc-1',
+          name: 'account-1',
+          apiKey: 'sk-1',
+          baseApi: `http://127.0.0.1:${mockUpstreamPort}`
+        })
+        .mockResolvedValueOnce({
+          id: 'acc-2',
+          name: 'account-2',
+          apiKey: 'sk-2',
+          baseApi: `http://127.0.0.1:${mockUpstreamPort}`
+        })
 
       clientWs.send(JSON.stringify({ model: 'gpt-4o', input: 'hello' }))
       const response = await waitForMessage(clientWs)
       const parsed = JSON.parse(response)
 
-      expect(parsed.type).toBe('error')
-      expect(parsed.status).toBe(429)
+      // Client should receive success, NOT 429
+      expect(parsed.type).toBe('response.created')
+      expect(parsed.response.id).toBe('resp-ok')
 
-      // Wait for async processing
+      // Account should have been marked rate limited
       await new Promise((r) => setTimeout(r, 200))
-
       expect(mockScheduler.markAccountRateLimited).toHaveBeenCalledWith(
         'acc-1',
         'openai-responses',
@@ -529,95 +561,131 @@ describe('CodexWebSocketRelayService', () => {
       clientWs.close()
     })
 
-    it('after 429 client WS stays open (readyState=OPEN)', async () => {
+    it('client WS stays open during silent switch', async () => {
       const clientWs = await connectClient()
 
-      mockUpstreamServer.once('connection', (upstreamWs) => {
+      let connectionCount = 0
+      mockUpstreamServer.on('connection', (upstreamWs) => {
+        connectionCount++
         upstreamWs.once('message', () => {
-          upstreamWs.send(JSON.stringify({ type: 'error', status: 429, error: { message: 'rl' } }))
+          if (connectionCount === 1) {
+            upstreamWs.send(
+              JSON.stringify({ type: 'error', status: 429, error: { message: 'rl' } })
+            )
+          } else {
+            upstreamWs.send(JSON.stringify({ type: 'response.created', response: { id: 'r-2' } }))
+          }
         })
       })
 
+      mockScheduler.selectAccountForApiKey
+        .mockResolvedValueOnce({ accountId: 'acc-1', accountType: 'openai-responses' })
+        .mockResolvedValueOnce({ accountId: 'acc-2', accountType: 'openai-responses' })
+      mockOpenaiResponsesAccountService.getAccount
+        .mockResolvedValueOnce({
+          id: 'acc-1',
+          name: 'a1',
+          apiKey: 'k1',
+          baseApi: `http://127.0.0.1:${mockUpstreamPort}`
+        })
+        .mockResolvedValueOnce({
+          id: 'acc-2',
+          name: 'a2',
+          apiKey: 'k2',
+          baseApi: `http://127.0.0.1:${mockUpstreamPort}`
+        })
+
       clientWs.send(JSON.stringify({ model: 'gpt-4o', input: 'hello' }))
       await waitForMessage(clientWs)
-
-      // Wait for upstream detach
-      await new Promise((r) => setTimeout(r, 300))
 
       expect(clientWs.readyState).toBe(WebSocket.OPEN)
 
       clientWs.close()
     })
 
-    it('after 429, next client message re-selects account via selectAccountForApiKey', async () => {
+    it('falls through to 429 when all accounts exhausted (no available account)', async () => {
       const clientWs = await connectClient()
 
-      // First connection: returns 429
       mockUpstreamServer.once('connection', (upstreamWs) => {
         upstreamWs.once('message', () => {
-          upstreamWs.send(JSON.stringify({ type: 'error', status: 429, error: { message: 'rl' } }))
+          upstreamWs.send(
+            JSON.stringify({ type: 'error', status: 429, error: { message: 'Rate limited' } })
+          )
         })
       })
 
-      clientWs.send(JSON.stringify({ model: 'gpt-4o', input: 'first' }))
-      await waitForMessage(clientWs)
-      await new Promise((r) => setTimeout(r, 300))
+      // After marking rate limited, no account available for retry
+      mockScheduler.selectAccountForApiKey
+        .mockResolvedValueOnce({ accountId: 'acc-1', accountType: 'openai-responses' })
+        .mockRejectedValueOnce(new Error('No available account'))
 
-      // Setup for second connection: different account
-      mockScheduler.selectAccountForApiKey.mockResolvedValue({
-        accountId: 'acc-2',
-        accountType: 'openai-responses'
-      })
-      mockOpenaiResponsesAccountService.getAccount.mockResolvedValue({
-        id: 'acc-2',
-        name: 'test-account-2',
-        apiKey: 'sk-test-2',
-        baseApi: `http://127.0.0.1:${mockUpstreamPort}`
-      })
-
-      mockUpstreamServer.once('connection', (upstreamWs) => {
-        upstreamWs.once('message', () => {
-          upstreamWs.send(JSON.stringify({ type: 'response.created', response: { id: 'resp-2' } }))
-        })
-      })
-
-      // Send second message — should trigger new selectAccountForApiKey
-      clientWs.send(JSON.stringify({ model: 'gpt-4o', input: 'second' }))
+      clientWs.send(JSON.stringify({ model: 'gpt-4o', input: 'hello' }))
       const response = await waitForMessage(clientWs)
       const parsed = JSON.parse(response)
 
-      expect(parsed.type).toBe('response.created')
-      // selectAccountForApiKey called twice (once for each connection)
-      expect(mockScheduler.selectAccountForApiKey).toHaveBeenCalledTimes(2)
+      // Should receive 429 since no accounts available
+      expect(parsed.type).toBe('error')
+      expect(parsed.status).toBe(429)
 
       clientWs.close()
     })
 
-    it('after 429 with no available accounts, sends 402 error and closes client WS', async () => {
+    it('retries up to 3 times across multiple 429 accounts', async () => {
       const clientWs = await connectClient()
 
-      // First connection: returns 429
-      mockUpstreamServer.once('connection', (upstreamWs) => {
+      let connectionCount = 0
+      mockUpstreamServer.on('connection', (upstreamWs) => {
+        connectionCount++
         upstreamWs.once('message', () => {
-          upstreamWs.send(JSON.stringify({ type: 'error', status: 429, error: { message: 'rl' } }))
+          if (connectionCount <= 2) {
+            // First two accounts: 429
+            upstreamWs.send(
+              JSON.stringify({ type: 'error', status: 429, error: { message: 'rl' } })
+            )
+          } else {
+            // Third account: success
+            upstreamWs.send(
+              JSON.stringify({ type: 'response.created', response: { id: 'resp-3' } })
+            )
+          }
         })
       })
 
-      clientWs.send(JSON.stringify({ model: 'gpt-4o', input: 'first' }))
-      await waitForMessage(clientWs) // 429 error
-      await new Promise((r) => setTimeout(r, 300))
+      mockScheduler.selectAccountForApiKey
+        .mockResolvedValueOnce({ accountId: 'acc-1', accountType: 'openai-responses' })
+        .mockResolvedValueOnce({ accountId: 'acc-2', accountType: 'openai-responses' })
+        .mockResolvedValueOnce({ accountId: 'acc-3', accountType: 'openai-responses' })
+      mockOpenaiResponsesAccountService.getAccount
+        .mockResolvedValueOnce({
+          id: 'acc-1',
+          name: 'a1',
+          apiKey: 'k1',
+          baseApi: `http://127.0.0.1:${mockUpstreamPort}`
+        })
+        .mockResolvedValueOnce({
+          id: 'acc-2',
+          name: 'a2',
+          apiKey: 'k2',
+          baseApi: `http://127.0.0.1:${mockUpstreamPort}`
+        })
+        .mockResolvedValueOnce({
+          id: 'acc-3',
+          name: 'a3',
+          apiKey: 'k3',
+          baseApi: `http://127.0.0.1:${mockUpstreamPort}`
+        })
 
-      // No accounts available for second attempt
-      mockScheduler.selectAccountForApiKey.mockRejectedValue(new Error('No available account'))
-
-      clientWs.send(JSON.stringify({ model: 'gpt-4o', input: 'second' }))
+      clientWs.send(JSON.stringify({ model: 'gpt-4o', input: 'hello' }))
       const response = await waitForMessage(clientWs)
       const parsed = JSON.parse(response)
 
-      expect(parsed.type).toBe('error')
-      expect(parsed.status).toBe(402)
+      // Client should receive success from third account
+      expect(parsed.type).toBe('response.created')
+      expect(parsed.response.id).toBe('resp-3')
+      expect(mockScheduler.markAccountRateLimited).toHaveBeenCalledTimes(2)
+      expect(mockScheduler.selectAccountForApiKey).toHaveBeenCalledTimes(3)
 
-      await waitForClose(clientWs)
+      clientWs.close()
     })
   })
 
