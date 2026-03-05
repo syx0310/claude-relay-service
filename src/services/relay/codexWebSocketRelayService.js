@@ -431,18 +431,28 @@ class CodexWebSocketRelayService {
         connState.upstreamWs = upstreamWs
         logger.info(`✅ [CodexWS] Upstream connected: ${upstreamUrl}`)
 
-        // 设置上游消息处理
+        // 设置上游消息处理（带守卫防止旧上游事件影响新连接）
+        const currentUpstream = upstreamWs
         upstreamWs.on('message', (msg) => {
+          if (connState.upstreamWs !== currentUpstream) {
+            return
+          }
           this._handleUpstreamMessage(clientWs, connState, msg)
         })
 
         upstreamWs.on('close', (code, reason) => {
+          if (connState.upstreamWs !== currentUpstream) {
+            return
+          }
           const reasonStr = reason?.toString() || ''
           logger.info(`🔌 [CodexWS] Upstream closed: code=${code} reason=${reasonStr}`)
           this._handleUpstreamClose(clientWs, connState, code, reasonStr)
         })
 
         upstreamWs.on('error', (err) => {
+          if (connState.upstreamWs !== currentUpstream) {
+            return
+          }
           logger.error(`❌ [CodexWS] Upstream error: ${err.message}`)
           this._handleUpstreamError(clientWs, connState, err)
         })
@@ -749,6 +759,7 @@ class CodexWebSocketRelayService {
   _detachUpstream(connState) {
     if (connState.upstreamWs) {
       try {
+        connState.upstreamWs.removeAllListeners()
         if (connState.upstreamWs.readyState === WebSocket.OPEN) {
           connState.upstreamWs.close(1000, 'Detaching')
         } else {

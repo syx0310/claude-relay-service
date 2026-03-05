@@ -91,121 +91,172 @@ class OpenAIResponsesRelayService {
       req.once('close', handleClientDisconnect)
       res.once('close', handleClientDisconnect)
 
-      // 构建目标 URL（根据 providerEndpoint 配置决定端点路径）
-      const providerEndpoint = fullAccount.providerEndpoint || 'responses'
-      let targetPath = req.path
+      // 429 静默切号重试循环
+      const MAX_SWITCH_RETRIES = 3
+      let currentAccount = fullAccount
+      let response
 
-      // 根据 providerEndpoint 配置归一化路径
-      // 注意：unified.js 已将 /v1/chat/completions 的请求体转换为 Responses 格式，
-      // 因此这里只需归一化路径即可；反向 responses→completions 需要同时转换请求体，
-      // 目前不支持，所以只保留 responses 和 auto 两种模式
-      if (
-        providerEndpoint === 'responses' &&
-        (targetPath === '/v1/chat/completions' || targetPath === '/chat/completions')
-      ) {
-        const newPath = targetPath.startsWith('/v1') ? '/v1/responses' : '/responses'
-        logger.info(`📝 Normalized path (${req.path}) → ${newPath} (providerEndpoint=responses)`)
-        targetPath = newPath
-      }
-      // providerEndpoint === 'auto' 时保持原始路径不变
+      for (let switchAttempt = 0; ; switchAttempt++) {
+        // 构建目标 URL（根据 providerEndpoint 配置决定端点路径）
+        const providerEndpoint = currentAccount.providerEndpoint || 'responses'
+        let targetPath = req.path
 
-      // 防止 baseApi 已含 /v1 时路径重复（如 baseApi=http://host/v1 + targetPath=/v1/responses → /v1/v1/responses）
-      const baseApi = fullAccount.baseApi || ''
-      if (baseApi.endsWith('/v1') && targetPath.startsWith('/v1/')) {
-        targetPath = targetPath.slice(3) // '/v1/responses' → '/responses'
-      }
-      const targetUrl = `${baseApi}${targetPath}`
-      logger.info(`🎯 Forwarding to: ${targetUrl}`)
-
-      // 构建请求头 - 使用统一的 headerFilter 移除 CDN headers
-      const headers = {
-        ...filterForOpenAI(req.headers),
-        Authorization: `Bearer ${fullAccount.apiKey}`,
-        'Content-Type': 'application/json'
-      }
-
-      // 处理 User-Agent
-      if (fullAccount.userAgent) {
-        // 使用自定义 User-Agent
-        headers['User-Agent'] = fullAccount.userAgent
-        logger.debug(`📱 Using custom User-Agent: ${fullAccount.userAgent}`)
-      } else if (req.headers['user-agent']) {
-        // 透传原始 User-Agent
-        headers['User-Agent'] = req.headers['user-agent']
-        logger.debug(`📱 Forwarding original User-Agent: ${req.headers['user-agent']}`)
-      }
-
-      // 配置请求选项
-      const requestOptions = {
-        method: req.method,
-        url: targetUrl,
-        headers,
-        data: req.body,
-        timeout: this.defaultTimeout,
-        responseType: req.body?.stream ? 'stream' : 'json',
-        validateStatus: () => true, // 允许处理所有状态码
-        signal: abortController.signal
-      }
-
-      // 配置代理（如果有）
-      if (fullAccount.proxy) {
-        const proxyAgent = ProxyHelper.createProxyAgent(fullAccount.proxy)
-        if (proxyAgent) {
-          requestOptions.httpAgent = proxyAgent
-          requestOptions.httpsAgent = proxyAgent
-          requestOptions.proxy = false
-          logger.info(
-            `🌐 Using proxy for OpenAI-Responses: ${ProxyHelper.getProxyDescription(fullAccount.proxy)}`
-          )
+        // 根据 providerEndpoint 配置归一化路径
+        if (
+          providerEndpoint === 'responses' &&
+          (targetPath === '/v1/chat/completions' || targetPath === '/chat/completions')
+        ) {
+          const newPath = targetPath.startsWith('/v1') ? '/v1/responses' : '/responses'
+          logger.info(`📝 Normalized path (${req.path}) → ${newPath} (providerEndpoint=responses)`)
+          targetPath = newPath
         }
-      }
+        // providerEndpoint === 'auto' 时保持原始路径不变
 
-      // 记录请求信息
-      logger.info('📤 OpenAI-Responses relay request', {
-        accountId: account.id,
-        accountName: account.name,
-        targetUrl,
-        method: req.method,
-        stream: req.body?.stream || false,
-        model: req.body?.model || 'unknown',
-        userAgent: headers['User-Agent'] || 'not set'
-      })
+        // 防止 baseApi 已含 /v1 时路径重复
+        const baseApi = currentAccount.baseApi || ''
+        if (baseApi.endsWith('/v1') && targetPath.startsWith('/v1/')) {
+          targetPath = targetPath.slice(3) // '/v1/responses' → '/responses'
+        }
+        const targetUrl = `${baseApi}${targetPath}`
+        logger.info(`🎯 Forwarding to: ${targetUrl}`)
 
-      // 发送请求
-      const response = await axios(requestOptions)
+        // 构建请求头 - 使用统一的 headerFilter 移除 CDN headers
+        const headers = {
+          ...filterForOpenAI(req.headers),
+          Authorization: `Bearer ${currentAccount.apiKey}`,
+          'Content-Type': 'application/json'
+        }
 
-      // 处理 429 限流错误
-      if (response.status === 429) {
-        const { resetsInSeconds, errorData } = await this._handle429Error(
-          account,
-          response,
-          req.body?.stream,
-          sessionHash
-        )
+        // 处理 User-Agent
+        if (currentAccount.userAgent) {
+          headers['User-Agent'] = currentAccount.userAgent
+          logger.debug(`📱 Using custom User-Agent: ${currentAccount.userAgent}`)
+        } else if (req.headers['user-agent']) {
+          headers['User-Agent'] = req.headers['user-agent']
+          logger.debug(`📱 Forwarding original User-Agent: ${req.headers['user-agent']}`)
+        }
 
-        const oaiAutoProtectionDisabled =
-          account?.disableAutoProtection === true || account?.disableAutoProtection === 'true'
-        if (!oaiAutoProtectionDisabled) {
-          await upstreamErrorHelper
-            .markTempUnavailable(
-              account.id,
-              'openai-responses',
-              429,
-              resetsInSeconds || upstreamErrorHelper.parseRetryAfter(response.headers)
+        // 配置请求选项
+        const requestOptions = {
+          method: req.method,
+          url: targetUrl,
+          headers,
+          data: req.body,
+          timeout: this.defaultTimeout,
+          responseType: req.body?.stream ? 'stream' : 'json',
+          validateStatus: () => true,
+          signal: abortController.signal
+        }
+
+        // 配置代理（如果有）
+        if (currentAccount.proxy) {
+          const proxyAgent = ProxyHelper.createProxyAgent(currentAccount.proxy)
+          if (proxyAgent) {
+            requestOptions.httpAgent = proxyAgent
+            requestOptions.httpsAgent = proxyAgent
+            requestOptions.proxy = false
+            logger.info(
+              `🌐 Using proxy for OpenAI-Responses: ${ProxyHelper.getProxyDescription(currentAccount.proxy)}`
             )
-            .catch(() => {})
-        }
-
-        // 返回错误响应（使用处理后的数据，避免循环引用）
-        const errorResponse = errorData || {
-          error: {
-            message: 'Rate limit exceeded',
-            type: 'rate_limit_error',
-            code: 'rate_limit_exceeded',
-            resets_in_seconds: resetsInSeconds
           }
         }
-        return res.status(429).json(errorResponse)
+
+        // 记录请求信息
+        logger.info('📤 OpenAI-Responses relay request', {
+          accountId: currentAccount.id || account.id,
+          accountName: currentAccount.name || account.name,
+          targetUrl,
+          method: req.method,
+          stream: req.body?.stream || false,
+          model: req.body?.model || 'unknown',
+          userAgent: headers['User-Agent'] || 'not set'
+        })
+
+        // 发送请求
+        response = await axios(requestOptions)
+
+        // 处理 429 限流错误
+        if (response.status === 429) {
+          const currentAccountRef = currentAccount
+          const currentAccountId = currentAccount.id || account.id
+          const { resetsInSeconds, errorData } = await this._handle429Error(
+            { ...account, id: currentAccountId, name: currentAccount.name || account.name },
+            response,
+            req.body?.stream,
+            sessionHash
+          )
+
+          const oaiAutoProtectionDisabled =
+            currentAccountRef?.disableAutoProtection === true ||
+            currentAccountRef?.disableAutoProtection === 'true'
+          if (!oaiAutoProtectionDisabled) {
+            await upstreamErrorHelper
+              .markTempUnavailable(
+                currentAccountId,
+                'openai-responses',
+                429,
+                resetsInSeconds || upstreamErrorHelper.parseRetryAfter(response.headers)
+              )
+              .catch(() => {})
+          }
+
+          // 尝试静默切号重试
+          if (switchAttempt < MAX_SWITCH_RETRIES) {
+            logger.info(
+              `🔄 [OpenAI-Responses] 429 silent switch ${switchAttempt + 1}/${MAX_SWITCH_RETRIES}`
+            )
+            await new Promise((r) => setTimeout(r, 1000))
+
+            // 重新选择账户
+            const newResult = await unifiedOpenAIScheduler.selectAccountForApiKey(
+              apiKeyData,
+              sessionHash,
+              req.body?.model
+            )
+            if (!newResult?.accountId) {
+              logger.warn('🚫 [OpenAI-Responses] No account available for silent switch')
+              // 无可用账户，返回 429
+              const errorResponse = errorData || {
+                error: {
+                  message: 'Rate limit exceeded',
+                  type: 'rate_limit_error',
+                  code: 'rate_limit_exceeded',
+                  resets_in_seconds: resetsInSeconds
+                }
+              }
+              return res.status(429).json(errorResponse)
+            }
+            const newAccount = await openaiResponsesAccountService.getAccount(newResult.accountId)
+            if (!newAccount?.apiKey) {
+              logger.warn('🚫 [OpenAI-Responses] New account missing apiKey for silent switch')
+              const errorResponse = errorData || {
+                error: {
+                  message: 'Rate limit exceeded',
+                  type: 'rate_limit_error',
+                  code: 'rate_limit_exceeded',
+                  resets_in_seconds: resetsInSeconds
+                }
+              }
+              return res.status(429).json(errorResponse)
+            }
+            currentAccount = newAccount
+            account = { ...account, id: newAccount.id, name: newAccount.name }
+            continue
+          }
+
+          // 重试耗尽，返回错误响应
+          const errorResponse = errorData || {
+            error: {
+              message: 'Rate limit exceeded',
+              type: 'rate_limit_error',
+              code: 'rate_limit_exceeded',
+              resets_in_seconds: resetsInSeconds
+            }
+          }
+          return res.status(429).json(errorResponse)
+        }
+
+        break // 非 429，跳出重试循环
       }
 
       // 处理其他错误状态码
