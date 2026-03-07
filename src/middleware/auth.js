@@ -1782,11 +1782,14 @@ const requestLogger = (req, res, next) => {
     })
   }
 
-  // 拦截 res.json() 捕获响应体
-  const originalJson = res.json.bind(res)
-  res.json = (body) => {
-    res._responseBody = body
-    return originalJson(body)
+  // 拦截 res.json() 捕获响应体（仅 debug 级别，避免大对象序列化消耗 CPU/内存）
+  const isDebugLevel = logger.isLevelEnabled?.('debug') || config.logging?.level === 'debug'
+  if (isDebugLevel) {
+    const originalJson = res.json.bind(res)
+    res.json = (body) => {
+      res._responseBody = body
+      return originalJson(body)
+    }
   }
 
   res.on('finish', () => {
@@ -1807,9 +1810,24 @@ const requestLogger = (req, res, next) => {
     // 构建树形 metadata
     const meta = { requestId }
 
-    // 请求体（非 GET 且有内容时显示）
+    // 请求体：debug 级别记录完整 body，其他级别仅记录摘要（避免大 prompt/base64 图片的序列化开销）
     if (req.method !== 'GET' && req.body && Object.keys(req.body).length > 0) {
-      meta.req = req.body
+      if (isDebugLevel) {
+        meta.req = req.body
+      } else {
+        // 只记录轻量摘要，不触发 safeStringify 深度遍历
+        const summary = { model: req.body.model }
+        if (req.body.messages) {
+          summary.messages = req.body.messages.length
+        }
+        if (req.body.system) {
+          summary.hasSystem = true
+        }
+        if (req.body.stream !== undefined) {
+          summary.stream = req.body.stream
+        }
+        meta.req = summary
+      }
     }
 
     // 查询参数（GET 请求且有查询参数时单独显示）
@@ -1818,8 +1836,8 @@ const requestLogger = (req, res, next) => {
       meta.query = req.originalUrl.substring(queryIdx + 1)
     }
 
-    // 响应体
-    if (res._responseBody) {
+    // 响应体：仅 debug 级别记录完整响应体
+    if (isDebugLevel && res._responseBody) {
       meta.res = res._responseBody
     }
 
@@ -1848,6 +1866,9 @@ const requestLogger = (req, res, next) => {
     if (duration > 5000) {
       logger.warn(`🐌 Slow request: ${duration}ms ${req.method} ${req.originalUrl}`)
     }
+
+    // 主动释放响应体引用，帮助 GC 及时回收
+    res._responseBody = undefined
   })
 
   res.on('error', (error) => {

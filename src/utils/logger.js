@@ -7,7 +7,7 @@ const fs = require('fs')
 const os = require('os')
 
 // 安全的 JSON 序列化函数，处理循环引用和特殊字符
-const safeStringify = (obj, maxDepth = Infinity) => {
+const safeStringify = (obj, maxDepth = 10) => {
   const seen = new WeakSet()
 
   const replacer = (key, value, depth = 0) => {
@@ -18,6 +18,10 @@ const safeStringify = (obj, maxDepth = Infinity) => {
     // 处理字符串值，清理可能导致JSON解析错误的特殊字符
     if (typeof value === 'string') {
       try {
+        // 超长字符串直接截断（避免在正则替换上浪费 CPU）
+        if (value.length > 10000) {
+          return `${value.substring(0, 10000)}...[truncated, ${value.length} chars]`
+        }
         // 移除或转义可能导致JSON解析错误的字符
         const cleanValue = value
           // eslint-disable-next-line no-control-regex
@@ -38,13 +42,56 @@ const safeStringify = (obj, maxDepth = Infinity) => {
       }
       seen.add(value)
 
+      // Buffer / Uint8Array 早期拦截（避免遍历百万级键值对导致 CPU 爆满）
+      if (Buffer.isBuffer(value) || value instanceof Uint8Array) {
+        return `[Buffer ${value.length} bytes]`
+      }
+
+      // Axios 错误对象精简：剥离 config.data（请求体）和 request（HTTP 对象），
+      // 这些字段可达数十 MB，序列化会导致 CPU/内存飙升
+      if (value.isAxiosError === true) {
+        const summary = {
+          message: value.message,
+          code: value.code,
+          status: value.response?.status,
+          statusText: value.response?.statusText,
+          url: value.config?.url,
+          method: value.config?.method,
+          _note: '[AxiosError: config.data and request stripped to prevent CPU spike]'
+        }
+        // 保留 response.data 的文本摘要（401/402/403/429 的错误原因在里面）
+        const resData = value.response?.data
+        if (resData !== null && resData !== undefined) {
+          if (typeof resData === 'string') {
+            summary.responseData = resData.substring(0, 500)
+          } else if (resData.error?.message) {
+            summary.responseData = String(resData.error.message).substring(0, 500)
+          } else if (typeof resData === 'object') {
+            try {
+              summary.responseData = JSON.stringify(resData).substring(0, 500)
+            } catch (_) {
+              summary.responseData = '[Unserializable response data]'
+            }
+          }
+        }
+        return summary
+      }
+
       // 过滤掉常见的循环引用对象
       if (value.constructor) {
         const constructorName = value.constructor.name
         if (
-          ['Socket', 'TLSSocket', 'HTTPParser', 'IncomingMessage', 'ServerResponse'].includes(
-            constructorName
-          )
+          [
+            'Socket',
+            'TLSSocket',
+            'HTTPParser',
+            'IncomingMessage',
+            'ServerResponse',
+            'ClientRequest',
+            'Writable',
+            'ReadableState',
+            'WritableState'
+          ].includes(constructorName)
         ) {
           return `[${constructorName} Object]`
         }
@@ -52,10 +99,28 @@ const safeStringify = (obj, maxDepth = Infinity) => {
 
       // 递归处理对象属性
       if (Array.isArray(value)) {
+        // 超长数组截断
+        if (value.length > 100) {
+          const truncated = value
+            .slice(0, 100)
+            .map((item, index) => replacer(index, item, depth + 1))
+          truncated.push(`...[${value.length - 100} more items]`)
+          return truncated
+        }
         return value.map((item, index) => replacer(index, item, depth + 1))
       } else {
+        const entries = Object.entries(value)
+        // 超多键的对象截断（如 Buffer 被展开为 {"0":123,"1":34,...}）
+        if (entries.length > 200) {
+          const sample = {}
+          for (const [k, v] of entries.slice(0, 5)) {
+            sample[k] = replacer(k, v, depth + 1)
+          }
+          sample._note = `[Object with ${entries.length} keys, showing first 5]`
+          return sample
+        }
         const result = {}
-        for (const [k, v] of Object.entries(value)) {
+        for (const [k, v] of entries) {
           // 确保键名也是安全的
           // eslint-disable-next-line no-control-regex
           const safeKey = typeof k === 'string' ? k.replace(/[\u0000-\u001F\u007F]/g, '') : k
