@@ -453,6 +453,7 @@ class ApiKeyService {
           restrictedModels,
           enableClientRestriction: keyData.enableClientRestriction === 'true',
           allowedClients,
+          allow1mContext: keyData.allow1mContext === 'true',
           dailyCostLimit,
           totalCostLimit,
           weeklyOpusCostLimit,
@@ -1230,6 +1231,7 @@ class ApiKeyService {
         'restrictedModels',
         'enableClientRestriction',
         'allowedClients',
+        'allow1mContext',
         'dailyCostLimit',
         'totalCostLimit',
         'weeklyOpusCostLimit',
@@ -1537,7 +1539,8 @@ class ApiKeyService {
     cacheReadTokens = 0,
     model = 'unknown',
     accountId = null,
-    accountType = null
+    accountType = null,
+    serviceTier = null
   ) {
     try {
       const totalTokens = inputTokens + outputTokens + cacheCreateTokens + cacheReadTokens
@@ -1551,7 +1554,8 @@ class ApiKeyService {
           cache_creation_input_tokens: cacheCreateTokens,
           cache_read_input_tokens: cacheReadTokens
         },
-        model
+        model,
+        serviceTier
       )
 
       // 检查是否为 1M 上下文请求
